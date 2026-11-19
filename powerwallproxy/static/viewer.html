@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>powerwallproxy debug viewer</title>
+<style>
+  :root { --bg:#111317; --panel:#1a1d23; --line:#2a2f38; --fg:#d8dbe0; --dim:#7d8590;
+          --reasoning:#9aa4b2; --tool:#f0b44c; --comm:#4cc9f0; --spawn:#e05ff0; --ok:#5fd38a; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.45 ui-monospace,Consolas,monospace; }
+  header { display:flex; gap:16px; align-items:center; padding:8px 16px; border-bottom:1px solid var(--line); }
+  header b { font-size:14px; }
+  #conn { color:var(--dim); }
+  #links { padding:6px 16px; color:var(--dim); max-height:84px; overflow:auto; border-bottom:1px solid var(--line); }
+  #links div { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #agents { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:10px; padding:10px 16px; }
+  .agent { background:var(--panel); border:1px solid var(--line); border-radius:6px; display:flex; flex-direction:column; height:460px; }
+  .agent.orchestrator { border-color:var(--spawn); box-shadow:0 0 12px #e05ff033; }
+  .agent h3 { margin:0; padding:6px 10px; font-size:13px; border-bottom:1px solid var(--line); display:flex; gap:8px; }
+  .agent h3 .st { margin-left:auto; color:var(--dim); font-weight:normal; }
+  .agent h3 .st.streaming { color:var(--ok); } .agent h3 .st.error { color:var(--err); }
+  .agent h3 .st.waiting_tool { color:var(--tool); }
+  .log { overflow:auto; padding:6px 10px; flex:1; }
+  .turn { border-top:1px dashed var(--line); padding-top:4px; margin-top:4px; }
+  .meta { color:var(--dim); font-size:11px; }
+  .blk { white-space:pre-wrap; word-break:break-word; margin:3px 0; }
+  .reasoning { color:var(--reasoning); font-style:italic; }
+  .tool_call { color:var(--tool); } .tool_call.communication { color:var(--comm); } .tool_call.spawn { color:var(--spawn); }
+  .ctx { color:var(--dim); white-space:pre-wrap; max-height:4.5em; overflow:hidden; }
+  .result { color:var(--ok); white-space:pre-wrap; max-height:6em; overflow:hidden; } .result.err, .error { color:var(--err); }
+  img { max-width:100%; max-height:140px; display:block; margin:3px 0; border-radius:3px; }
+</style>
+</head>
+<body>
+<header><b>powerwallproxy</b><span id="conn">connecting…</span><span id="stats" class="meta"></span>
+  <span id="scen" hidden style="margin-left:auto">
+    <select id="scenSel" multiple size="1" title="ctrl/shift-click for several"></select>
+    × <input id="scenTeams" type="number" min="1" max="20" value="1" style="width:3em">
+    <button id="scenApply">run</button>
+  </span>
+</header>
+<div id="links"></div>
+<div id="agents"></div>
+<script>
+// Debug viewer only: shows the raw event stream per agent. Not the real frontend.
+const base = location.origin.startsWith("http") ? location.origin : "http://localhost:8765";
+const agentsEl = document.getElementById("agents"), linksEl = document.getElementById("links");
+let agents = {}, turns = {}, blocks = {}, events = 0;
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function partsEl(parts, cls) {
+  const wrap = el("div");
+  for (const p of parts) {
+    if (p.type === "text") wrap.append(el("div", cls, p.text));
+    else if (p.type === "image") { const i = el("img"); i.src = base + p.blob.url; i.title = `${p.blob.width}x${p.blob.height}`; wrap.append(i); }
+    else wrap.append(el("div", "meta", `[${p.type} ${p.blob.mime} ${p.blob.bytes}B]`));
+  }
+  return wrap;
+}
+function scroll(a) { if (a.log.scrollHeight - a.log.scrollTop - a.log.clientHeight < 80) a.log.scrollTop = a.log.scrollHeight; }
+
+function apply(ev) {
+  const d = ev.data, a = agents[ev.agent_id];
+  switch (ev.type) {
+    case "world.reset": agents = {}; turns = {}; blocks = {}; agentsEl.innerHTML = ""; linksEl.innerHTML = ""; break;
+    case "agent.upsert": {
+      if (!a) {
+        const root = el("div", "agent"), h = el("h3"), log = el("div", "log");
+        const name = el("span"), st = el("span", "st");
+        h.append(name, st); root.append(h, log); agentsEl.append(root);
+        agents[ev.agent_id] = { root, name, st, log };
+      }
+      const x = agents[ev.agent_id];
+      x.root.classList.toggle("orchestrator", d.role === "orchestrator");
+      x.name.textContent = `${d.name} · ${d.role}${d.model ? " · " + d.model : ""}`;
+      break;
+    }
+    case "agent.status": if (a) { a.st.textContent = d.status; a.st.className = "st " + d.status; } break;
+    case "agent.remove": if (a) { a.root.remove(); delete agents[ev.agent_id]; } break;
+    case "agent.link": {
+      const line = el("div", null, `${d.kind.padEnd(8)} ${d.source_agent} → ${d.target_agent}${d.text ? ": " + d.text : ""}`);
+      line.style.color = d.kind === "spawn" ? "var(--spawn)" : "var(--comm)";
+      linksEl.prepend(line); while (linksEl.children.length > 50) linksEl.lastChild.remove();
+      break;
+    }
+    case "session.reset": if (a) a.log.innerHTML = ""; break;
+    case "turn.start": if (a) {
+      const t = el("div", "turn"); t.append(el("div", "meta", `turn ${d.turn_id} · ${d.context_messages} msgs in context`));
+      a.log.append(t); turns[d.turn_id] = t; while (a.log.children.length > 8) a.log.firstChild.remove();
+    } break;
+    case "context.message": if (turns[d.turn_id]) {
+      turns[d.turn_id].append(el("div", "meta", `${d.role}${d.name ? " (" + d.name + ")" : ""}:`), partsEl(d.parts, "ctx"));
+    } break;
+    case "tool.result": if (turns[d.turn_id]) {
+      turns[d.turn_id].append(el("div", "meta", `← ${d.tool_name} result${d.is_error ? " (error)" : ""}`), partsEl(d.parts, d.is_error ? "result err" : "result"));
+    } break;
+    case "block.start": if (turns[d.turn_id]) {
+      const b = el("div", "blk " + d.kind + (d.tool_call ? " " + d.tool_call.kind : ""));
+      if (d.tool_call) b.textContent = `→ ${d.tool_call.name}(`;
+      turns[d.turn_id].append(b); blocks[d.block_id] = b;
+    } break;
+    case "block.delta": if (blocks[d.block_id]) blocks[d.block_id].textContent += d.text; break;
+    case "block.end": if (blocks[d.block_id]) {
+      if (d.kind === "tool_call") blocks[d.block_id].textContent += ")";
+      if (d.parts.length) blocks[d.block_id].append(partsEl(d.parts));
+      delete blocks[d.block_id];
+    } break;
+    case "turn.end": if (turns[d.turn_id]) {
+      const u = d.usage, tm = d.timing;
+      turns[d.turn_id].append(el("div", "meta", `${d.finish_reason} · ${u.prompt_tokens ?? "?"}→${u.completion_tokens ?? "?"} tok · ttft ${tm.ttft_ms ?? "-"}ms · ${tm.tokens_per_s ?? "-"} tok/s`));
+    } break;
+    case "error": if (turns[d.turn_id]) turns[d.turn_id].append(el("div", "error", `✖ ${d.code}: ${d.message}${d.retry_in_ms ? ` (retry in ${d.retry_in_ms}ms)` : ""}`)); break;
+  }
+  if (a && agents[ev.agent_id]) scroll(a);
+}
+
+function connect() {
+  const ws = new WebSocket(base.replace(/^http/, "ws") + "/ws");
+  const conn = document.getElementById("conn");
+  ws.onopen = () => conn.textContent = "connected";
+  ws.onmessage = (m) => {
+    const ev = JSON.parse(m.data); events++;
+    if (ev.type === "hello") { apply({ type: "world.reset", data: {} }); conn.textContent = `connected · source=${ev.data.source} · protocol v${ev.data.protocol_version}`; }
+    else apply(ev);
+  };
+  ws.onclose = () => { conn.textContent = "disconnected, retrying…"; setTimeout(connect, 1000); };
+}
+// Scenario picker (only when the server runs the dummy source)
+fetch(base + "/dummy/scenarios").then(r => r.ok ? r.json() : null).then(info => {
+  if (!info) return;
+  const sel = document.getElementById("scenSel"), teams = document.getElementById("scenTeams");
+  for (const s of info.available) {
+    const o = el("option", null, `${s.name} (${s.agents})`); o.value = s.name; o.title = s.description;
+    o.selected = info.running.scenarios.includes(s.name); sel.append(o);
+  }
+  sel.size = Math.min(info.available.length, 4);
+  teams.value = info.running.teams;
+  document.getElementById("scen").hidden = false;
+  document.getElementById("scenApply").onclick = () => fetch(base + "/dummy/scenarios", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scenarios: [...sel.selectedOptions].map(o => o.value), teams: +teams.value }),
+  }).then(r => { if (!r.ok) r.text().then(alert); });
+});
+setInterval(() => { document.getElementById("stats").textContent = `${Object.keys(agents).length} agents · ${events} events`; }, 500);
+connect();
+</script>
+</body>
+</html>

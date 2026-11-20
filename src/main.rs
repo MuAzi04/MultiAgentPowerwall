@@ -28,7 +28,7 @@ use tokio_tungstenite::{
 // Embedded at compile time. Path is relative to this source file,
 // so "../index.html" works for both src/main.rs and examples/client.rs.
 
-const INDEX_HTML: &str = include_str!("C:\\University\\Programming\\PowerWallApp\\static\\index.html");
+const INDEX_HTML: &str = include_str!("../static/index.html");
 /// What gets sent to the browser.
 #[derive(Serialize)]
 struct Out {

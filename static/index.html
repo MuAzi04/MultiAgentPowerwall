@@ -1,10 +1,66 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Title</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Event stream</title>
+    <style>
+        body { margin: 0; background: #111; color: #ddd; }
+        #log {
+            margin: 0;
+            padding: 1rem;
+            font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        #status {
+            position: fixed; top: 8px; right: 12px;
+            font: 12px sans-serif; color: #888;
+        }
+    </style>
 </head>
 <body>
+<div id="status">connecting…</div>
+<pre id="log"></pre>
 
+<script>
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+    let cur = null; // span holding the current streaming text
+
+    function connect() {
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+        ws.onopen = () => { status.textContent = 'connected'; };
+
+        ws.onclose = () => {
+            status.textContent = 'disconnected, retrying…';
+            setTimeout(connect, 1000);
+        };
+
+        ws.onmessage = (e) => {
+            const m = JSON.parse(e.data);
+            const atBottom = innerHeight + scrollY >= document.body.scrollHeight - 40;
+
+            if (m.delta) {
+                if (!cur) {
+                    cur = document.createElement('span');
+                    log.appendChild(cur);
+                }
+                cur.textContent += m.text;
+            } else {
+                cur = null;
+                const line = document.createElement('div');
+                line.textContent = m.text;
+                log.appendChild(line);
+            }
+
+            if (atBottom) scrollTo(0, document.body.scrollHeight);
+        };
+    }
+
+    connect();
+</script>
 </body>
 </html>
